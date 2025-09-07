@@ -1,0 +1,9 @@
+{
+  "name": "meeting-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.js"
+  }
+}
+

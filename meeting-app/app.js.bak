@@ -1,0 +1,1465 @@
+(() => {
+  const $ = (q) => document.querySelector(q);
+  const fmt = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
+  };
+
+  // Safe blob -> base64 without huge spread
+  async function blobToBase64(blob) {
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result; // data:...;base64,XXXX
+        resolve(String(dataUrl).split(',')[1] || '');
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // Real-time transcription WebSocket client
+  class RealtimeTranscription {
+    constructor() {
+      this.ws = null;
+      this.isEnabled = false;
+      this.isConnected = false;
+      this.reconnectAttempts = 0;
+      this.maxReconnectAttempts = 5;
+      this.reconnectDelay = 1000;
+      this.audioContext = null;
+      this.mediaStream = null;
+      this.processor = null;
+      this.isRecording = false;
+      this.transcript = '';
+      this.wordCount = 0;
+      this.startTime = null;
+      this.lastUpdateTime = null;
+      
+      // UI elements
+      this.realtimeCard = $('#realtimeCard');
+      this.toggleBtn = $('#toggleRealtimeBtn');
+      this.statusIndicator = $('#statusIndicator');
+      this.statusText = $('#statusText');
+      this.confidenceFill = $('#confidenceFill');
+      this.confidenceValue = $('#confidenceValue');
+      this.realtimeTranscript = $('#realtimeTranscript');
+      this.interimTranscript = $('#interimTranscript');
+      this.wordCountEl = $('#wordCount');
+      this.transcriptDuration = $('#transcriptDuration');
+      this.lastUpdateEl = $('#lastUpdate');
+      
+      this.initializeUI();
+    }
+    
+    initializeUI() {
+      this.toggleBtn?.addEventListener('click', () => {
+        if (this.isEnabled) {
+          this.disable();
+        } else {
+          this.enable();
+        }
+      });
+      
+      this.updateStatus('disconnected', 'Ready to connect');
+    }
+    
+    async enable() {
+      if (this.isEnabled) return;
+      
+      try {
+        this.isEnabled = true;
+        this.realtimeCard?.classList.remove('hidden');
+        this.updateToggleButton();
+        this.updateStatus('connecting', 'Connecting...');
+        
+        await this.connect();
+        
+      } catch (error) {
+        console.error('Failed to enable real-time transcription:', error);
+        this.updateStatus('error', 'Connection failed');
+        this.disable();
+      }
+    }
+    
+    disable() {
+      this.isEnabled = false;
+      this.disconnect();
+      this.updateToggleButton();
+      this.updateStatus('disconnected', 'Disabled');
+    }
+    
+    async connect() {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+      
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        const language = languageSelect?.value || 'en';
+        const template = templateSelect?.value || 'general';
+        
+        const wsUrl = `${protocol}//${host}/ws/transcribe?language=${language}&template=${template}`;
+        
+        this.ws = new WebSocket(wsUrl, 'transcription');
+        
+        this.ws.onopen = () => {
+          console.log('WebSocket connected for real-time transcription');
+          this.isConnected = true;
+          this.reconnectAttempts = 0;
+          this.updateStatus('connected', 'Connected');
+          
+          // Send ping to test connection
+          this.sendMessage({ type: 'ping' });
+        };
+        
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            this.handleMessage(data);
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
+          }
+        };
+        
+        this.ws.onclose = (event) => {
+          console.log('WebSocket closed:', event.code, event.reason);
+          this.isConnected = false;
+          this.updateStatus('disconnected', 'Disconnected');
+          
+          if (this.isEnabled && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.scheduleReconnect();
+          }
+        };
+        
+        this.ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          this.updateStatus('error', 'Connection error');
+        };
+        
+      } catch (error) {
+        console.error('Failed to create WebSocket connection:', error);
+        this.updateStatus('error', 'Failed to connect');
+        throw error;
+      }
+    }
+    
+    disconnect() {
+      if (this.ws) {
+        this.ws.close();
+        this.ws = null;
+      }
+      this.isConnected = false;
+      this.stopAudioCapture();
+    }
+    
+    scheduleReconnect() {
+      this.reconnectAttempts++;
+      const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+      
+      this.updateStatus('connecting', `Reconnecting in ${Math.ceil(delay/1000)}s...`);
+      
+      setTimeout(() => {
+        if (this.isEnabled) {
+          this.connect();
+        }
+      }, delay);
+    }
+    
+    sendMessage(message) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(message));
+      }
+    }
+    
+    handleMessage(data) {
+      switch (data.type) {
+        case 'connection_established':
+          console.log('Real-time transcription session established:', data.sessionId);
+          break;
+          
+        case 'transcript_update':
+          this.handleTranscriptUpdate(data);
+          break;
+          
+        case 'session_complete':
+          this.handleSessionComplete(data);
+          break;
+          
+        case 'error':
+          console.error('Transcription error:', data.message);
+          this.updateStatus('error', data.message);
+          break;
+          
+        case 'pong':
+          // Connection is alive
+          break;
+          
+        default:
+          console.log('Unknown message type:', data.type);
+      }
+    }
+    
+    handleTranscriptUpdate(data) {
+      const { transcript, interimTranscript, confidence, timestamp } = data;
+      
+      // Update main transcript
+      if (transcript && transcript !== this.transcript) {
+        this.transcript = transcript;
+        this.updateTranscriptDisplay(transcript);
+        this.updateWordCount();
+      }
+      
+      // Update interim transcript
+      if (interimTranscript) {
+        this.updateInterimTranscript(interimTranscript);
+      }
+      
+      // Update confidence
+      if (confidence !== undefined) {
+        this.updateConfidence(confidence);
+      }
+      
+      // Update last update time
+      this.lastUpdateTime = timestamp || Date.now();
+      this.updateLastUpdateDisplay();
+    }
+    
+    handleSessionComplete(data) {
+      const { finalTranscript, summary } = data;
+      
+      if (finalTranscript) {
+        this.transcript = finalTranscript;
+        this.updateTranscriptDisplay(finalTranscript);
+      }
+      
+      // Clear interim transcript
+      this.updateInterimTranscript('');
+      
+      console.log('Transcription session completed');
+      if (summary) {
+        console.log('Final summary:', summary);
+      }
+    }
+    
+    updateTranscriptDisplay(transcript) {
+      if (!this.realtimeTranscript) return;
+      
+      // Remove placeholder if present
+      const placeholder = this.realtimeTranscript.querySelector('.transcript-placeholder');
+      if (placeholder) {
+        placeholder.remove();
+      }
+      
+      // Split transcript into words and add confidence styling
+      const words = transcript.split(' ');
+      const wordElements = words.map((word, index) => {
+        const confidence = this.getWordConfidence(word, index);
+        const confidenceClass = this.getConfidenceClass(confidence);
+        
+        return `<span class="transcript-word ${confidenceClass}" data-confidence="${confidence}">${word}</span>`;
+      }).join(' ');
+      
+      this.realtimeTranscript.innerHTML = wordElements;
+      
+      // Scroll to bottom
+      this.realtimeTranscript.scrollTop = this.realtimeTranscript.scrollHeight;
+      
+      // Highlight new words
+      this.highlightNewWords();
+    }
+    
+    updateInterimTranscript(text) {
+      if (!this.interimTranscript) return;
+      
+      if (text && text.trim()) {
+        this.interimTranscript.textContent = text;
+        this.interimTranscript.classList.add('visible');
+      } else {
+        this.interimTranscript.classList.remove('visible');
+      }
+    }
+    
+    updateConfidence(confidence) {
+      if (!this.confidenceFill || !this.confidenceValue) return;
+      
+      const percentage = Math.round(confidence * 100);
+      this.confidenceFill.style.width = `${percentage}%`;
+      this.confidenceValue.textContent = `${percentage}%`;
+    }
+    
+    updateWordCount() {
+      if (!this.wordCountEl) return;
+      
+      this.wordCount = this.transcript.split(' ').filter(word => word.trim()).length;
+      this.wordCountEl.textContent = this.wordCount.toString();
+    }
+    
+    updateLastUpdateDisplay() {
+      if (!this.lastUpdateEl || !this.lastUpdateTime) return;
+      
+      const now = Date.now();
+      const diff = now - this.lastUpdateTime;
+      
+      if (diff < 1000) {
+        this.lastUpdateEl.textContent = 'Just now';
+      } else if (diff < 60000) {
+        this.lastUpdateEl.textContent = `${Math.floor(diff / 1000)}s ago`;
+      } else {
+        this.lastUpdateEl.textContent = `${Math.floor(diff / 60000)}m ago`;
+      }
+    }
+    
+    updateDurationDisplay() {
+      if (!this.transcriptDuration || !this.startTime) return;
+      
+      const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+      const minutes = Math.floor(elapsed / 60);
+      const seconds = elapsed % 60;
+      this.transcriptDuration.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    
+    getWordConfidence(word, index) {
+      // Simulate confidence based on word characteristics
+      // In a real implementation, this would come from the transcription service
+      const length = word.length;
+      const hasNumbers = /\d/.test(word);
+      const hasSpecialChars = /[^a-zA-Z0-9\s]/.test(word);
+      
+      let confidence = 0.8;
+      if (length < 3) confidence -= 0.2;
+      if (hasNumbers) confidence -= 0.1;
+      if (hasSpecialChars) confidence -= 0.1;
+      
+      return Math.max(0.3, Math.min(1.0, confidence + (Math.random() - 0.5) * 0.2));
+    }
+    
+    getConfidenceClass(confidence) {
+      if (confidence >= 0.8) return 'high-confidence';
+      if (confidence >= 0.6) return 'medium-confidence';
+      return 'low-confidence';
+    }
+    
+    highlightNewWords() {
+      // Add animation to recently added words
+      const words = this.realtimeTranscript?.querySelectorAll('.transcript-word');
+      if (!words) return;
+      
+      const recentWords = Array.from(words).slice(-5); // Last 5 words
+      recentWords.forEach(word => {
+        word.classList.add('new');
+        setTimeout(() => word.classList.remove('new'), 1000);
+      });
+    }
+    
+    updateToggleButton() {
+      if (!this.toggleBtn) return;
+      
+      if (this.isEnabled) {
+        this.toggleBtn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="6" y="4" width="4" height="16"/>
+            <rect x="14" y="4" width="4" height="16"/>
+          </svg>
+          Disable Real-time
+        `;
+        this.toggleBtn.classList.add('active');
+      } else {
+        this.toggleBtn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <polygon points="10,8 16,12 10,16 10,8"/>
+          </svg>
+          Enable Real-time
+        `;
+        this.toggleBtn.classList.remove('active');
+      }
+    }
+    
+    updateStatus(status, message) {
+      if (!this.statusIndicator || !this.statusText) return;
+      
+      this.statusIndicator.className = `status-indicator ${status}`;
+      this.statusText.textContent = message;
+    }
+    
+    async startAudioCapture(mediaStream) {
+      if (!this.isEnabled || !this.isConnected) return;
+      
+      try {
+        this.mediaStream = mediaStream;
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = this.audioContext.createMediaStreamSource(mediaStream);
+        
+        // Create a script processor for audio data
+        this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+        
+        this.processor.onaudioprocess = (event) => {
+          if (!this.isRecording || !this.isConnected) return;
+          
+          const inputBuffer = event.inputBuffer;
+          const inputData = inputBuffer.getChannelData(0);
+          
+          // Convert float32 audio data to int16
+          const int16Data = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            int16Data[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+          }
+          
+          // Send audio data via WebSocket
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(int16Data.buffer);
+          }
+        };
+        
+        source.connect(this.processor);
+        this.processor.connect(this.audioContext.destination);
+        
+        this.isRecording = true;
+        this.startTime = Date.now();
+        
+        // Start duration timer
+        this.durationTimer = setInterval(() => {
+          this.updateDurationDisplay();
+        }, 1000);
+        
+        console.log('Real-time audio capture started');
+        
+      } catch (error) {
+        console.error('Failed to start audio capture:', error);
+        this.updateStatus('error', 'Audio capture failed');
+      }
+    }
+    
+    stopAudioCapture() {
+      this.isRecording = false;
+      
+      if (this.durationTimer) {
+        clearInterval(this.durationTimer);
+        this.durationTimer = null;
+      }
+      
+      if (this.processor) {
+        this.processor.disconnect();
+        this.processor = null;
+      }
+      
+      if (this.audioContext) {
+        this.audioContext.close();
+        this.audioContext = null;
+      }
+      
+      this.mediaStream = null;
+      
+      console.log('Real-time audio capture stopped');
+    }
+    
+    reset() {
+      this.transcript = '';
+      this.wordCount = 0;
+      this.startTime = null;
+      this.lastUpdateTime = null;
+      
+      if (this.realtimeTranscript) {
+        this.realtimeTranscript.innerHTML = `
+          <div class="transcript-placeholder">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            <p>Real-time transcription will appear here when you start recording</p>
+          </div>
+        `;
+      }
+      
+      this.updateInterimTranscript('');
+      this.updateConfidence(0);
+      
+      if (this.wordCountEl) this.wordCountEl.textContent = '0';
+      if (this.transcriptDuration) this.transcriptDuration.textContent = '00:00';
+      if (this.lastUpdateEl) this.lastUpdateEl.textContent = '--';
+    }
+  }
+
+  // Initialize real-time transcription
+  const realtimeTranscription = new RealtimeTranscription();
+
+  const state = {
+    recording: false,
+    media: null,
+    recorder: null,
+    chunks: [],
+    startedAt: 0,
+    tick: null,
+    seconds: 0,
+    currentBlob: null,
+    currentMeta: null,
+  };
+
+  const timerEl = $('#timer');
+  const recordBtn = $('#recordBtn');
+  const sessionCard = $('#sessionCard');
+  const sessionMeta = $('#sessionMeta');
+  const downloadBtn = $('#downloadBtn');
+  const transcribeBtn = $('#transcribeBtn');
+  const copyBtn = $('#copyBtn');
+  const shareWABtn = $('#shareWABtn');
+  const shareEmailBtn = $('#shareEmailBtn');
+  const transcriptEl = $('#transcript');
+  const summaryEl = $('#summary');
+  const languageSelect = $('#languageSelect');
+  const templateSelect = $('#templateSelect');
+  const STORAGE_KEY = 'meeting-app.recordings.v1';
+
+  // Debug: Check if critical elements exist
+  console.log('🔍 Element check:');
+  console.log('  recordBtn:', !!recordBtn);
+  console.log('  languageSelect:', !!languageSelect);
+  console.log('  templateSelect:', !!templateSelect);
+  console.log('  timerEl:', !!timerEl);
+  
+  if (!recordBtn) {
+    console.error('❌ CRITICAL: Record button not found!');
+  }
+  
+  // Debug: Check browser API support
+  console.log('🌐 Browser API support:');
+  console.log('  navigator.mediaDevices:', !!navigator.mediaDevices);
+  console.log('  getUserMedia:', !!navigator.mediaDevices?.getUserMedia);
+  console.log('  MediaRecorder:', typeof MediaRecorder !== 'undefined');
+  console.log('  WebSocket:', typeof WebSocket !== 'undefined');
+  
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.error('❌ CRITICAL: getUserMedia not supported!');
+    alert('Your browser does not support audio recording. Please use a modern browser like Chrome, Firefox, or Edge.');
+  }
+  
+  if (typeof MediaRecorder === 'undefined') {
+    console.error('❌ CRITICAL: MediaRecorder not supported!');
+    alert('Your browser does not support MediaRecorder API. Please use a modern browser.');
+  }
+  async function start() {
+    if (state.recording) return;
+
+    // Validate required UI elements
+    if (!languageSelect) {
+      console.error('languageSelect element not found');
+      alert('Language selection element is missing. Please refresh the page.');
+      return;
+    }
+    if (!templateSelect) {
+      console.error('templateSelect element not found');
+      alert('Template selection element is missing. Please refresh the page.');
+      return;
+    }
+
+    try {
+      // Request microphone permission
+      state.media = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100
+        }
+      });
+    } catch (err) {
+      console.error('Microphone access denied:', err);
+      alert('Microphone permission is required to record. Please allow access and try again.');
+      return;
+    }
+
+    // Start real-time transcription if enabled
+    if (realtimeTranscription.isEnabled && realtimeTranscription.isConnected) {
+      await realtimeTranscription.startAudioCapture(state.media);
+    }
+
+    // Set up MediaRecorder for backup/download
+    state.chunks = [];
+    try {
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/wav'
+      ];
+      let selectedMimeType = '';
+      for (const mimeType of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(mimeType) && !selectedMimeType) {
+          selectedMimeType = mimeType;
+        }
+      }
+      if (!selectedMimeType) throw new Error('No supported audio format found');
+
+      state.recorder = new MediaRecorder(state.media, {
+        mimeType: selectedMimeType,
+        audioBitsPerSecond: 128000
+      });
+    } catch (err) {
+      console.warn('MediaRecorder setup failed with preferred mime types:', err);
+      try {
+        state.recorder = new MediaRecorder(state.media);
+      } catch (fallbackErr) {
+        console.error('Default MediaRecorder also failed:', fallbackErr);
+        alert('Your browser does not support audio recording. Please try a different browser.');
+        return;
+      }
+    }
+
+    state.recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) state.chunks.push(e.data); };
+    state.recorder.onstop = onStop;
+    state.recorder.onerror = (e) => {
+      console.error('MediaRecorder error:', e);
+      alert('Recording error occurred. Please try again.');
+      stop();
+    };
+
+    // Start recording
+    state.recorder.start(1000); // Collect data every second
+    state.startedAt = Date.now();
+    state.tick = setInterval(updateTimer, 200);
+
+    // Update UI
+    recordBtn.textContent = 'STOP';
+    recordBtn.classList.add('recording');
+    state.recording = true;
+    sessionCard.classList.add('hidden');
+
+    // Show real-time card if not already visible
+    if (realtimeTranscription.isEnabled) {
+      realtimeTranscription.realtimeCard?.classList.remove('hidden');
+    }
+  }
+  function stop() {
+    if (!state.recording) return;
+    
+    console.log('Stopping recording...');
+    
+    // Stop real-time transcription
+    realtimeTranscription.stopAudioCapture();
+    
+    // Stop MediaRecorder
+    if (state.recorder && state.recorder.state !== 'inactive') {
+      state.recorder.stop();
+    }
+    
+    // Stop media tracks
+    if (state.media) {
+      state.media.getTracks().forEach(track => {
+        track.stop();
+        console.log('Stopped track:', track.kind);
+      });
+    }
+    
+    // Clear timer
+    if (state.tick) {
+      clearInterval(state.tick);
+      state.tick = null;
+    }
+    
+    // Update UI
+    recordBtn.textContent = 'RECORD';
+    recordBtn.classList.remove('recording');
+    state.recording = false;
+    
+    console.log('Recording stopped');
+  }
+
+  function onStop() {
+    console.log('MediaRecorder stopped, processing audio...');
+    
+    if (state.chunks.length === 0) {
+      console.warn('No audio data recorded');
+      alert('No audio was recorded. Please check your microphone and try again.');
+      return;
+    }
+    
+    // Create blob from recorded chunks
+    const blob = new Blob(state.chunks, { type: state.recorder.mimeType || 'audio/webm' });
+    state.currentBlob = blob;
+    
+    console.log('Audio blob created:', {
+      size: blob.size,
+      type: blob.type,
+      duration: state.seconds
+    });
+    
+    // Create metadata
+    const meta = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      durationSec: Math.round(state.seconds),
+      language: languageSelect.value,
+      template: templateSelect.value,
+      size: blob.size,
+      mimeType: blob.type
+    };
+    state.currentMeta = meta;
+
+    // Show session card
+    sessionCard.classList.remove('hidden');
+    downloadBtn.disabled = false;
+    transcribeBtn.disabled = false;
+    transcriptEl.textContent = '';
+    summaryEl.textContent = '';
+    
+    // Update session metadata display
+    const langLabelInit = (meta.language || 'auto').toUpperCase();
+    sessionMeta.innerHTML = `${fmt(meta.durationSec)} • <span class="badge">${langLabelInit}</span> • ${meta.template}`;
+
+    // Save to local storage
+    blobToBase64(blob).then((b64) => {
+      const list = loadRecordings();
+      const recordingData = { 
+        meta, 
+        audioB64: b64
+      };
+      
+      // If real-time transcription was used, include the transcript
+      if (realtimeTranscription.transcript) {
+        recordingData.transcript = realtimeTranscription.transcript;
+        recordingData.realtimeTranscript = true;
+        
+        // Update UI to show we already have a transcript
+        transcriptEl.textContent = realtimeTranscription.transcript;
+        copyBtn.disabled = false;
+        shareWABtn.disabled = false;
+        shareEmailBtn.disabled = false;
+        
+        // Update session meta to show real-time transcript available
+        sessionMeta.innerHTML += ' • <span class="badge" style="background: #10b981; color: white;">Live Transcript</span>';
+      }
+      
+      list.unshift(recordingData);
+      saveRecordings(list);
+      renderLists();
+      
+      console.log('Recording saved to local storage');
+    }).catch(error => {
+      console.error('Failed to save recording:', error);
+      alert('Failed to save recording. Please try again.');
+    });
+  }
+
+  function updateTimer() {
+    const elapsed = (Date.now() - state.startedAt) / 1000;
+    state.seconds = elapsed;
+    timerEl.textContent = fmt(elapsed);
+  }
+
+  async function start() {
+    if (state.recording) return;
+    try {
+      state.media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      alert('Microphone permission is required to record.');
+      return;
+    }
+    state.chunks = [];
+    state.recorder = new MediaRecorder(state.media, { mimeType: 'audio/webm' });
+    state.recorder.ondataavailable = (e) => e.data && state.chunks.push(e.data);
+    state.recorder.onstop = onStop;
+    state.recorder.start();
+    state.startedAt = Date.now();
+    state.tick = setInterval(updateTimer, 200);
+    recordBtn.textContent = 'STOP';
+    recordBtn.classList.add('recording');
+    state.recording = true;
+    sessionCard.classList.add('hidden');
+  }
+
+  function stop() {
+    if (!state.recording) return;
+    state.recorder.stop();
+    state.media.getTracks().forEach(t => t.stop());
+    clearInterval(state.tick);
+    recordBtn.textContent = 'RECORD';
+    recordBtn.classList.remove('recording');
+    state.recording = false;
+  }
+
+  function onStop() {
+    const blob = new Blob(state.chunks, { type: 'audio/webm' });
+    state.currentBlob = blob;
+    const meta = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      durationSec: Math.round(state.seconds),
+      language: languageSelect.value,
+      template: templateSelect.value,
+      size: blob.size,
+    };
+    state.currentMeta = meta;
+
+    sessionCard.classList.remove('hidden');
+    downloadBtn.disabled = false;
+    transcribeBtn.disabled = false;
+    transcriptEl.textContent = '';
+    summaryEl.textContent = '';
+    const langLabelInit = (meta.language || 'auto').toUpperCase();
+    sessionMeta.innerHTML = `${fmt(meta.durationSec)} • <span class="badge">${langLabelInit}</span> • ${meta.template}`;
+
+    // Persist a copy in local storage list
+    blobToBase64(blob).then((b64) => {
+      const list = loadRecordings();
+      list.unshift({ meta, audioB64: b64 });
+      saveRecordings(list);
+      renderLists();
+    });
+  }
+
+
+
+  function renderLists() {
+    const pastPane = document.querySelector('.pane[data-pane="past"]');
+    const filesPane = document.querySelector('.pane[data-pane="files"]');
+    const upPane = document.querySelector('.pane[data-pane="upcoming"]');
+    const list = loadRecordings();
+
+    pastPane.innerHTML = '<div class="card" id="allSummaryCard">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'
+      +   '<div>'
+      +     '<div class="session-title">Summarize All Meetings</div>'
+      +     '<div class="session-sub">Creates an overall brief, action plan, and folders</div>'
+      +   '</div>'
+      +   '<div class="session-actions">'
+      +     '<button id="summarizeAllBtn" class="primary">Summarize All</button>'
+      +     '<button id="exportAllMdBtn" class="secondary" disabled>Export All .md</button>'
+      +     '<button id="exportAllCsvBtn" class="secondary" disabled>Export All .csv</button>'
+      +     '<button id="shareAllWABtn" class="secondary" disabled>Share Brief</button>'
+      +     '<button id="shareAllEmailBtn" class="secondary" disabled>Email Brief</button>'
+      +   '</div>'
+      + '</div>'
+      + '<div id="allSummaryOut" class="transcript" style="display:none"></div>'
+      + '<div id="foldersOut" class="summary" style="display:none"></div>'
+      + '</div>'
+      + '<div class="list"></div>';
+    filesPane.innerHTML = '<div class="list"></div>';
+    upPane.innerHTML = '<div class="card">Add upcoming meetings to your calendar and sync notes later.</div>';
+    const pastList = pastPane.querySelector('.list');
+    const fileList = filesPane.querySelector('.list');
+
+    if (list.length === 0) {
+      pastList.innerHTML = '<div class="card">No past recordings yet.</div>';
+      fileList.innerHTML = '<div class="card">No files yet.</div>';
+      return;
+    }
+
+    list.forEach((row, idx) => {
+      const d = new Date(row.meta.createdAt);
+      const title = `Meeting • ${d.toLocaleString()}`;
+      const sub = `${fmt(row.meta.durationSec)} • ${row.meta.language.toUpperCase()} • ${row.meta.template}`;
+
+      const el = document.createElement('div');
+      el.className = 'item';
+      const displayLang = (row.meta.detectedLanguage || row.meta.language || '').toUpperCase();
+      const tags = `<div class="meta-extras">${displayLang ? `<span class="badge">${displayLang}</span>` : ''}${(row.categories && row.categories.length) ? `<span class="tags">${row.categories.join(', ')}</span>` : ''}</div>`;
+      el.innerHTML = `
+        <div class="meta">
+          <div class="title">${title}</div>
+          <div class="sub">${sub}</div>
+          ${tags}
+        </div>
+        <div class="actions">
+          <button class="secondary" data-act="play">Play</button>
+          <button class="secondary" data-act="download">Download</button>
+          <button class="primary" data-act="transcribe">Transcribe</button>
+          <button class="secondary" data-act="copy" ${row.transcript ? '' : 'disabled'}>Copy</button>
+          <button class="secondary" data-act="wa" ${row.transcript ? '' : 'disabled'}>WA</button>
+          <button class="secondary" data-act="email" ${row.transcript ? '' : 'disabled'}>Email</button>
+        </div>`;
+
+      el.addEventListener('click', async (e) => {
+        const act = e.target.closest('button')?.dataset?.act;
+        if (!act) return;
+        if (act === 'play') {
+          const audio = new Audio('data:audio/webm;base64,' + row.audioB64);
+          audio.play();
+        } else if (act === 'download') {
+          const a = document.createElement('a');
+          a.href = 'data:audio/webm;base64,' + row.audioB64;
+          a.download = `meeting-${idx + 1}.webm`;
+          a.click();
+        } else if (act === 'transcribe') {
+          try {
+            const res = await fetch('/api/transcribe', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audioB64: row.audioB64,
+                mimeType: 'audio/webm',
+                language: row.meta.language,
+                template: row.meta.template,
+                durationSec: row.meta.durationSec,
+              })
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            row.transcript = data.transcript;
+            row.summary = data.summary;
+            if (data.detectedLanguage) { row.meta.detectedLanguage = data.detectedLanguage; }
+            saveRecordings(list);
+            alert('Transcription complete. Open item to view.');
+          } catch (err) {
+            alert('Transcription failed: ' + err.message);
+          }
+        } else if (act === 'copy') {
+          if (!row.transcript) return alert('Please transcribe first.');
+          const text = buildShareText(row.meta, row.summary || '', row.transcript || '');
+          copyToClipboard(text).then(() => alert('Copied to clipboard'));          
+        } else if (act === 'wa') {
+          if (!row.transcript) return alert('Please transcribe first.');
+          const text = buildShareText(row.meta, row.summary || '', row.transcript || '');
+          shareWA(text);
+        } else if (act === 'email') {
+          if (!row.transcript) return alert('Please transcribe first.');
+          const text = buildShareText(row.meta, row.summary || '', row.transcript || '');
+          shareEmail('Meeting Notes', text);
+        }
+      });
+
+      pastList.appendChild(el);
+
+      const fe = document.createElement('div');
+      fe.className = 'item';
+      fe.innerHTML = `
+        <div class="meta">
+          <div class="title">${title}</div>
+          <div class="sub">${(row.summary ? 'Has summary' : 'Audio file') }</div>
+        </div>
+        <div class="actions">
+          <button class="secondary" data-act="download">Download</button>
+        </div>`;
+      fe.addEventListener('click', (e) => {
+        if (e.target.closest('button')?.dataset?.act === 'download') {
+          const a = document.createElement('a');
+          a.href = 'data:audio/webm;base64,' + row.audioB64;
+          a.download = `meeting-${idx + 1}.webm`;
+          a.click();
+        }
+      });
+      fileList.appendChild(fe);
+    });
+
+    // Hook up Summarize All
+    const summarizeBtn = pastPane.querySelector('#summarizeAllBtn');
+    const out = pastPane.querySelector('#allSummaryOut');
+    const exportAllMdBtn = pastPane.querySelector('#exportAllMdBtn');
+    const exportAllCsvBtn = pastPane.querySelector('#exportAllCsvBtn');
+    const shareAllWABtn = pastPane.querySelector('#shareAllWABtn');
+    const shareAllEmailBtn = pastPane.querySelector('#shareAllEmailBtn');
+
+    let lastSummaryAll = null;
+
+    summarizeBtn?.addEventListener('click', async () => {
+      if (!list.length) return alert('No recordings yet.');
+      summarizeBtn.disabled = true;
+      summarizeBtn.textContent = 'Summarizing…';
+      out.style.display = 'block';
+      out.textContent = 'Transcribing any missing audio and generating an overall brief…';
+      const folders = pastPane.querySelector('#foldersOut');
+      folders.style.display = 'block';
+      folders.textContent = '';
+      try {
+        // Prepare compact payload
+        const items = list.map(r => ({
+          transcript: r.transcript || '',
+          audioB64: r.audioB64,
+          language: r.meta.language,
+          template: r.meta.template,
+          durationSec: r.meta.durationSec,
+          createdAt: r.meta.createdAt
+        }));
+        const res = await fetch('/api/summary-all', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        lastSummaryAll = data;
+        out.textContent = data.combined || '(no result)';
+
+        // Save categories back into items and persist
+        if (Array.isArray(data.itemCategories)) {
+          data.itemCategories.forEach((cats, i) => { list[i].categories = cats; });
+          saveRecordings(list);
+        }
+
+        // Render folder view with export buttons
+        if (Array.isArray(data.categories) && data.categories.length) {
+          folders.innerHTML = '';
+          data.categories.forEach((c, idx) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+            const meetingList = (c.items || []).map(it => {
+              const rec = list[it.index];
+              if (!rec) return '• Meeting';
+              const dt = new Date(rec.meta.createdAt).toLocaleString();
+              return `• ${dt} — ${rec.meta.template}`;
+            }).join('\n');
+            const actionsList = (c.actions || []).map(a => `- ${a.owner ? a.owner + ' • ' : ''}${a.task}${a.due ? ' • due: ' + a.due : ''}${a.priority ? ' • ' + a.priority : ''}`).join('\n');
+            card.innerHTML = `
+              <div class="session-meta">
+                <div>
+                  <div class="session-title">${c.name || 'Category ' + (idx + 1)}</div>
+                  <div class="session-sub">${c.rationale ? c.rationale : ''}</div>
+                </div>
+                <div class="session-actions">
+                  <button class="secondary" data-act="md">Export .md</button>
+                  <button class="secondary" data-act="csv">Export .csv</button>
+                </div>
+              </div>
+              <div class="summary"><strong>Meetings</strong>\n${meetingList || '(none)'}
+              </div>
+              <div class="summary"><strong>Summary</strong>\n${c.summary || '(no summary)'}
+              </div>
+              <div class="summary"><strong>Action Items</strong>\n${actionsList || '(none)'}
+              </div>
+            `;
+
+            card.addEventListener('click', (e) => {
+              const act = e.target.closest('button')?.dataset?.act;
+              if (!act) return;
+              if (act === 'md') {
+                const md = buildCategoryMarkdown(c, list);
+                downloadText(md, `${(c.name || 'category-'+(idx+1)).replace(/[^a-z0-9-_]+/gi,'_')}.md`, 'text/markdown');
+              } else if (act === 'csv') {
+                const csv = buildCategoryCSV(c, list);
+                downloadText(csv, `${(c.name || 'category-'+(idx+1)).replace(/[^a-z0-9-_]+/gi,'_')}.csv`, 'text/csv');
+              }
+            });
+            folders.appendChild(card);
+          });
+        } else {
+          folders.textContent = 'No clear categories detected.';
+        }
+
+        // Enable Export/Share buttons for combined brief
+        [exportAllMdBtn, exportAllCsvBtn, shareAllWABtn, shareAllEmailBtn].forEach(b => b && (b.disabled = false));
+      } catch (err) {
+        out.textContent = 'Failed to summarize: ' + err.message;
+      } finally {
+        summarizeBtn.disabled = false;
+        summarizeBtn.textContent = 'Summarize All';
+      }
+    });
+
+    exportAllMdBtn?.addEventListener('click', () => {
+      if (!lastSummaryAll) return;
+      const md = buildAllMarkdown(lastSummaryAll.categories || [], lastSummaryAll.combined || '', list);
+      downloadText(md, 'all-meetings.md', 'text/markdown');
+    });
+    exportAllCsvBtn?.addEventListener('click', () => {
+      if (!lastSummaryAll) return;
+      const csv = buildAllCSV(lastSummaryAll.categories || [], list);
+      downloadText(csv, 'all-meetings.csv', 'text/csv');
+    });
+    shareAllWABtn?.addEventListener('click', () => {
+      if (!lastSummaryAll) return;
+      const text = buildShareBriefCombined(lastSummaryAll);
+      shareWA(text);
+    });
+    shareAllEmailBtn?.addEventListener('click', () => {
+      if (!lastSummaryAll) return;
+      const text = buildShareBriefCombined(lastSummaryAll);
+      shareEmail('All Meetings Brief', text);
+    });
+    const copyAllBtn = document.createElement('button');
+    copyAllBtn.className = 'secondary';
+    copyAllBtn.textContent = 'Copy Brief';
+    copyAllBtn.disabled = true;
+    pastPane.querySelector('#allSummaryCard .session-actions')?.appendChild(copyAllBtn);
+    summarizeBtn?.addEventListener('click', () => setTimeout(() => { copyAllBtn.disabled = false; }, 0));
+    copyAllBtn.addEventListener('click', async () => {
+      if (!lastSummaryAll) return;
+      const text = buildShareBriefCombined(lastSummaryAll);
+      await copyToClipboard(text);
+      copyAllBtn.textContent = 'Copied!';
+      setTimeout(() => copyAllBtn.textContent = 'Copy Brief', 1200);
+    });
+  }
+
+  // ---------- exports ----------
+  function buildCategoryMarkdown(c, list) {
+    const title = `# ${c.name || 'Category'}`;
+    const why = c.rationale ? `\n**Why**: ${c.rationale}\n` : '\n';
+    const meetings = (c.items || []).map(it => {
+      const rec = list[it.index];
+      if (!rec) return '- Meeting';
+      const dt = new Date(rec.meta.createdAt).toLocaleString();
+      return `- ${dt} — ${rec.meta.template}`;
+    }).join('\n');
+    const summary = c.summary ? `\n## Summary\n${c.summary}\n` : '';
+    const tableHeader = '\n## Action Items\n| Owner | Task | Due | Priority |\n| --- | --- | --- | --- |';
+    const rows = (c.actions || []).map(a => `| ${a.owner || ''} | ${escapeMd(a.task || '')} | ${a.due || ''} | ${a.priority || ''} |`).join('\n');
+    return [title, why, '## Meetings', meetings || '(none)', summary, tableHeader, rows || '|  |  |  |  |'].join('\n');
+  }
+
+  function buildCategoryCSV(c, list) {
+    const header = 'Category,Language,Owner,Task,Due,Priority,Meetings';
+    const meetings = (c.items || []).map(it => {
+      const rec = list[it.index];
+      if (!rec) return 'Meeting';
+      const dt = new Date(rec.meta.createdAt).toLocaleString();
+      const lg = (rec.meta.detectedLanguage || rec.meta.language || '').toUpperCase();
+      return `${dt} — ${rec.meta.template}${lg ? ' — ' + lg : ''}`;
+    }).join('; ');
+    const languages = Array.from(new Set((c.items || []).map(it => {
+      const rec = list[it.index];
+      return rec ? (rec.meta.detectedLanguage || rec.meta.language || '').toUpperCase() : '';
+    }).filter(Boolean))).join('; ');
+    const lines = (c.actions || []).map(a => [
+      csvCell(c.name || ''),
+      csvCell(languages),
+      csvCell(a.owner || ''),
+      csvCell(a.task || ''),
+      csvCell(a.due || ''),
+      csvCell(a.priority || ''),
+      csvCell(meetings)
+    ].join(','));
+    return [header, ...(lines.length ? lines : ['"","","","","",""'])].join('\n');
+  }
+
+  function csvCell(s){
+    const v = String(s).replace(/"/g,'""');
+    return '"' + v + '"';
+  }
+  function escapeMd(s){
+    return String(s).replace(/\|/g,'\\|');
+  }
+  function downloadText(text, filename, type){
+    const blob = new Blob([text], { type: type || 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  async function copyToClipboard(text){
+    try {
+      if (navigator.clipboard?.writeText) return await navigator.clipboard.writeText(text);
+    } catch {}
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } finally { document.body.removeChild(ta); }
+  }
+
+  function buildAllMarkdown(categories, combined, list){
+    let md = '# All Meetings Brief\n\n';
+    if (combined) md += combined + '\n\n';
+    (categories || []).forEach((c, i) => {
+      md += '\n---\n\n' + buildCategoryMarkdown(c, list) + '\n';
+    });
+    return md;
+  }
+
+  function buildAllCSV(categories, list){
+    const header = 'Category,Language,Owner,Task,Due,Priority,Meetings';
+    const lines = [];
+    (categories || []).forEach(c => {
+      const meetings = (c.items || []).map(it => {
+        const rec = list[it.index];
+        if (!rec) return 'Meeting';
+        const dt = new Date(rec.meta.createdAt).toLocaleString();
+        const lg = (rec.meta.detectedLanguage || rec.meta.language || '').toUpperCase();
+        return `${dt} — ${rec.meta.template}${lg ? ' — ' + lg : ''}`;
+      }).join('; ');
+      const languages = Array.from(new Set((c.items || []).map(it => {
+        const rec = list[it.index];
+        return rec ? (rec.meta.detectedLanguage || rec.meta.language || '').toUpperCase() : '';
+      }).filter(Boolean))).join('; ');
+      (c.actions || []).forEach(a => {
+        lines.push([csvCell(c.name || ''), csvCell(languages), csvCell(a.owner || ''), csvCell(a.task || ''), csvCell(a.due || ''), csvCell(a.priority || ''), csvCell(meetings)].join(','));
+      });
+    });
+    return [header, ...(lines.length ? lines : ['"","","","","",""'])].join('\n');
+  }
+
+  function buildShareBriefCombined(data){
+    const { combined = '', categories = [] } = data || {};
+    // Collect up to 15 actions across categories for a compact plan
+    const actions = [];
+    categories.forEach(c => (c.actions || []).forEach(a => actions.push({ c: c.name || 'Category', ...a })));
+    const top = actions.slice(0, 15).map(a => `- ${a.owner ? a.owner + ' • ' : ''}${a.task}${a.due ? ' • due: ' + a.due : ''}${a.priority ? ' • ' + a.priority : ''} (${a.c})`).join('\n');
+    let text = 'Overall Brief\n' + (combined || '(no summary)');
+    if (top) text += '\n\nTop Actions:\n' + top;
+    return text;
+  }
+
+  function setupTabs() {
+    const paneWrap = document.getElementById('panes');
+    const content = document.querySelector('.content');
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+  // Event listeners
+  recordBtn.addEventListener('click', () => state.recording ? stop() : start());
+
+  // Language/template change handlers for real-time transcription
+  languageSelect?.addEventListener('change', () => {
+    if (realtimeTranscription.isConnected) {
+      realtimeTranscription.sendMessage({
+        type: 'config_update',
+        language: languageSelect.value
+      });
+    }
+  });
+
+  templateSelect?.addEventListener('change', () => {
+    if (realtimeTranscription.isConnected) {
+      realtimeTranscription.sendMessage({
+        type: 'config_update',
+        template: templateSelect.value
+      });
+    }
+  });
+
+  downloadBtn.addEventListener('click', () => {
+    if (!state.currentBlob) return;
+    
+    try {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(state.currentBlob);
+      a.download = `meeting-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.${getFileExtension(state.currentBlob.type)}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      
+      console.log('Download initiated');
+    } catch (error) {
+      console.error('Download failed:', error);
+      alert('Download failed. Please try again.');
+    }
+  });
+
+  function getFileExtension(mimeType) {
+    const extensions = {
+      'audio/webm': 'webm',
+      'audio/mp4': 'm4a',
+      'audio/ogg': 'ogg',
+      'audio/wav': 'wav',
+      'audio/mpeg': 'mp3'
+    };
+    return extensions[mimeType] || 'webm';
+  }
+
+  transcribeBtn.addEventListener('click', async () => {
+    if (!state.currentBlob) return;
+    
+    // If we already have real-time transcript, ask user if they want to re-transcribe
+    if (realtimeTranscription.transcript && transcriptEl.textContent) {
+      const shouldRetranscribe = confirm(
+        'You already have a real-time transcript. Do you want to generate a new transcript using the full audio file? This may provide better accuracy.'
+      );
+      if (!shouldRetranscribe) return;
+    }
+    
+    transcribeBtn.disabled = true;
+    transcribeBtn.textContent = 'Transcribing…';
+    transcriptEl.textContent = 'Sending audio to server for transcription…';
+    summaryEl.textContent = '';
+    
+    try {
+      const b64 = await blobToBase64(state.currentBlob);
+      
+      console.log('Sending transcription request...', {
+        audioSize: state.currentBlob.size,
+        language: languageSelect.value,
+        template: templateSelect.value
+      });
+      
+      const res = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioB64: b64,
+          mimeType: state.currentBlob.type || 'audio/webm',
+          language: languageSelect.value,
+          template: templateSelect.value,
+          durationSec: state.currentMeta?.durationSec || 0,
+        })
+      });
+      
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Server error (${res.status}): ${errorText}`);
+      }
+      
+      const data = await res.json();
+      console.log('Transcription completed:', data);
+      
+      transcriptEl.textContent = data.transcript || '(no transcript)';
+      summaryEl.textContent = data.summary || '';
+      
+      // Update state
+      state.currentTranscript = data.transcript || '';
+      state.currentSummary = data.summary || '';
+      state.currentDetectedLanguage = data.detectedLanguage || '';
+      
+      // Update session meta with detected language
+      if (data.detectedLanguage) {
+        const langLabel = data.detectedLanguage.toUpperCase();
+        sessionMeta.innerHTML = `${fmt(state.currentMeta?.durationSec || 0)} • <span class="badge">${langLabel}</span> • ${state.currentMeta?.template || ''}`;
+      }
+
+      // Update saved recording with transcript and summary
+      const list = loadRecordings();
+      if (list[0]?.meta?.id === state.currentMeta?.id) {
+        list[0].transcript = data.transcript;
+        list[0].summary = data.summary;
+        if (data.detectedLanguage) {
+          list[0].meta.detectedLanguage = data.detectedLanguage;
+        }
+        saveRecordings(list);
+        renderLists();
+      }
+
+      // Enable share buttons
+      shareWABtn.disabled = false;
+      shareEmailBtn.disabled = false;
+      copyBtn.disabled = false;
+      
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      transcriptEl.textContent = `Transcription failed: ${err.message}`;
+      
+      // Show user-friendly error message
+      if (err.message.includes('OPENAI_API_KEY')) {
+        alert('Transcription service is not configured. Please contact support.');
+      } else if (err.message.includes('Network')) {
+        alert('Network error. Please check your connection and try again.');
+      } else {
+        alert('Transcription failed. Please try again or contact support if the problem persists.');
+      }
+    } finally {
+      transcribeBtn.disabled = false;
+      transcribeBtn.textContent = 'Transcribe';
+    }
+  });
+
+  function buildShareText(meta, summary, transcript) {
+    const d = meta?.createdAt ? new Date(meta.createdAt).toLocaleString() : new Date().toLocaleString();
+    const lang = (state.currentDetectedLanguage || meta?.detectedLanguage || meta?.language || languageSelect.value || 'en');
+    const header = `Meeting Notes — ${d}\nLanguage: ${String(lang).toUpperCase()} • Template: ${(meta?.template || templateSelect.value)} • Duration: ${fmt(meta?.durationSec || 0)}`;
+    const parts = [header];
+    if (summary) parts.push('\nSummary:\n' + summary.trim());
+    if (transcript) parts.push('\nTranscript:\n' + transcript.trim());
+    return parts.join('\n\n');
+  }
+
+  function shareWA(text){
+    const url = 'https://wa.me/?text=' + encodeURIComponent(text);
+    window.open(url, '_blank');
+  }
+  
+  function shareEmail(subject, text){
+    const href = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(text);
+    window.location.href = href;
+  }
+
+  // copyToClipboard is defined earlier; remove duplicate definition
+
+  shareWABtn.addEventListener('click', () => {
+    if (shareWABtn.disabled) return;
+    const text = buildShareText(state.currentMeta, state.currentSummary, state.currentTranscript);
+    shareWA(text);
+  });
+  
+  copyBtn.addEventListener('click', async () => {
+    if (copyBtn.disabled) return;
+    try {
+      const text = buildShareText(state.currentMeta, state.currentSummary, state.currentTranscript);
+      await copyToClipboard(text);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => copyBtn.textContent = 'Copy', 1200);
+    } catch (error) {
+      console.error('Copy failed:', error);
+      alert('Failed to copy to clipboard');
+    }
+  });
+  
+  shareEmailBtn.addEventListener('click', () => {
+    if (shareEmailBtn.disabled) return;
+    const subject = 'Meeting Notes';
+    const text = buildShareText(state.currentMeta, state.currentSummary, state.currentTranscript);
+    shareEmail(subject, text);
+  });
+
+  // Initialize UI on page load
+  document.addEventListener('DOMContentLoaded', () => {
+    console.log('Meeting app initialized');
+    
+    // Check for WebSocket support
+    if (!window.WebSocket) {
+      console.warn('WebSocket not supported - real-time transcription unavailable');
+      const realtimeCard = $('#realtimeCard');
+      if (realtimeCard) {
+        realtimeCard.style.display = 'none';
+      }
+    }
+    
+    // Check for MediaRecorder support
+    if (!window.MediaRecorder) {
+      console.error('MediaRecorder not supported');
+      alert('Your browser does not support audio recording. Please use a modern browser like Chrome, Firefox, or Safari.');
+      recordBtn.disabled = true;
+      return;
+    }
+    
+    // Check for getUserMedia support
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.error('getUserMedia not supported');
+      alert('Your browser does not support microphone access. Please use a modern browser with HTTPS.');
+      recordBtn.disabled = true;
+      return;
+    }
+    
+    // Load and render existing recordings
+    renderLists();
+    
+    // Set up periodic updates for real-time transcription
+    setInterval(() => {
+      if (realtimeTranscription.isEnabled && realtimeTranscription.lastUpdateTime) {
+        realtimeTranscription.updateLastUpdateDisplay();
+      }
+    }, 1000);
+    
+    console.log('✅ Meeting app ready');
+  });
+
+  // Handle page visibility changes
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // Page is hidden - pause real-time updates if needed
+      console.log('Page hidden');
+    } else {
+      // Page is visible - resume updates
+      console.log('Page visible');
+      if (realtimeTranscription.isEnabled && !realtimeTranscription.isConnected) {
+        // Try to reconnect if needed
+        realtimeTranscription.connect().catch(console.error);
+      }
+    }
+  });
+
+  // Handle beforeunload to clean up connections
+  window.addEventListener('beforeunload', () => {
+    if (state.recording) {
+      stop();
+    }
+    if (realtimeTranscription.isEnabled) {
+      realtimeTranscription.disable();
+    }
+  });
+
+  // ... rest of existing code for renderLists, etc. ...
+
+
+
+
+
+)();

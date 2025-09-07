@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meeting Recorder - AI-Powered Voice Recording</title>
+    <meta name="description" content="Record, transcribe, and summarize your meetings with AI-powered voice recording technology." />
+    <meta name="theme-color" content="#6f43ff" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='80'>🎙️</text></svg>" />
+    <link rel="stylesheet" href="style.css" />
+    
+    <!-- Preload critical resources -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  </head>
+  <body>
+    <header class="topbar" role="banner">
+      <button id="menuBtn" aria-label="Open menu" class="icon-btn" type="button">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">MR</div>
+        <h1>Meeting Recorder</h1>
+      </div>
+      <div class="spacer"></div>
+    </header>
+    <main class="content" role="main">
+      <div class="timer-section" aria-live="polite">
+        <div class="timer" id="timer" aria-label="Recording duration">00:00:00</div>
+        <div class="record-wrap">
+          <button id="recordBtn" class="record" type="button" aria-describedby="record-help">
+            <span class="record-text">RECORD</span>
+            <span class="record-icon" aria-hidden="true">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="8"></circle>
+              </svg>
+            </span>
+          </button>
+        </div>
+        <div id="record-help" class="sr-only">Press to start or stop recording your meeting</div>
+      </div>
+
+      <!-- Real-time Transcription Display -->
+      <section class="card hidden" id="realtimeCard" role="region" aria-labelledby="realtime-title">
+        <div class="card-title" id="realtime-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          Live Transcription
+          <div class="connection-status" id="connectionStatus">
+            <span class="status-indicator" id="statusIndicator"></span>
+            <span class="status-text" id="statusText">Connecting...</span>
+          </div>
+        </div>
+        
+        <div class="realtime-controls">
+          <button id="toggleRealtimeBtn" class="secondary" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <polygon points="10,8 16,12 10,16 10,8"/>
+            </svg>
+            Enable Real-time
+          </button>
+          <div class="confidence-display">
+            <span class="confidence-label">Confidence:</span>
+            <div class="confidence-bar">
+              <div class="confidence-fill" id="confidenceFill"></div>
+            </div>
+            <span class="confidence-value" id="confidenceValue">--</span>
+          </div>
+        </div>
+        
+        <div class="transcript-container">
+          <div id="realtimeTranscript" class="realtime-transcript" role="log" aria-live="polite" aria-label="Live transcript">
+            <div class="transcript-placeholder">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+              <p>Real-time transcription will appear here when you start recording</p>
+            </div>
+          </div>
+          
+          <div id="interimTranscript" class="interim-transcript" aria-live="assertive">
+            <!-- Interim/partial transcription results appear here -->
+          </div>
+        </div>
+        
+        <div class="transcript-stats">
+          <div class="stat">
+            <span class="stat-label">Words:</span>
+            <span class="stat-value" id="wordCount">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Duration:</span>
+            <span class="stat-value" id="transcriptDuration">00:00</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Last Update:</span>
+            <span class="stat-value" id="lastUpdate">--</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="promo" role="region" aria-labelledby="promo-title">
+        <div class="promo-left">
+          <span aria-hidden="true">✨</span>
+          <span id="promo-title">Get More Recording Time!</span>
+        </div>
+        <a class="upgrade" href="#" id="upgradeBtn" role="button">
+          Upgrade
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: 4px;">
+            <path d="m9 18 6-6-6-6"/>
+          </svg>
+        </a>
+      </div>
+
+      <section class="card" id="languageCard" role="region" aria-labelledby="language-title">
+        <div class="card-title" id="language-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M2 12h20"/>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          Language Selection
+        </div>
+        <select id="languageSelect" class="select" aria-describedby="language-help">
+          <option value="auto" selected>Auto-detect</option>
+          <option value="en">English (US)</option>
+          <option value="ms">Malay (Malaysia)</option>
+          <option value="es">Spanish (Spain)</option>
+          <option value="fr">French (France)</option>
+          <option value="de">German (Germany)</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="th">Thai</option>
+          <option value="vi">Vietnamese</option>
+        </select>
+        <div id="language-help" class="sr-only">Select the primary language for transcription</div>
+      </section>
+
+      <section class="card" id="templateCard" role="region" aria-labelledby="template-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14,2 14,8 20,8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10,9 9,9 8,9"/>
+          </svg>
+          Meeting Template
+        </div>
+        <select id="templateSelect" class="select" aria-describedby="template-help">
+          <option value="general" selected>General meeting</option>
+          <option value="standup">Daily standup</option>
+          <option value="oneonone">1:1 meeting</option>
+          <option value="interview">Interview</option>
+          <option value="brainstorm">Brainstorming session</option>
+          <option value="review">Performance review</option>
+          <option value="training">Training session</option>
+          <option value="client">Client meeting</option>
+        </select>
+        <div id="template-help" class="sr-only">Choose a template to optimize transcription and summary</div>
+      </section>
+
+      <section class="card hidden" id="sessionCard" role="region" aria-labelledby="session-title">
+        <div class="session-meta">
+          <div>
+            <div class="session-title" id="session-title">Current Session</div>
+            <div class="session-sub" id="sessionMeta"></div>
+          </div>
+          <div class="session-actions">
+            <button id="downloadBtn" class="secondary" disabled type="button" aria-describedby="download-help">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7,10 12,15 17,10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download
+            </button>
+            <button id="transcribeBtn" class="primary" disabled type="button" aria-describedby="transcribe-help">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+              Transcribe
+            </button>
+            <button id="copyBtn" class="secondary" disabled type="button" aria-describedby="copy-help">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              Copy
+            </button>
+            <button id="shareWABtn" class="secondary" disabled type="button" aria-describedby="whatsapp-help">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893A11.821 11.821 0 0020.893 3.488"/>
+              </svg>
+              WhatsApp
+            </button>
+            <button id="shareEmailBtn" class="secondary" disabled type="button" aria-describedby="email-help">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+              Email
+            </button>
+          </div>
+        </div>
+        
+        <!-- Hidden help text for screen readers -->
+        <div id="download-help" class="sr-only">Download the audio recording</div>
+        <div id="transcribe-help" class="sr-only">Generate AI transcription and summary</div>
+        <div id="copy-help" class="sr-only">Copy transcript to clipboard</div>
+        <div id="whatsapp-help" class="sr-only">Share via WhatsApp</div>
+        <div id="email-help" class="sr-only">Share via email</div>
+        
+        <div id="transcript" class="transcript" role="region" aria-labelledby="transcript-title"></div>
+        <div id="transcript-title" class="sr-only">Meeting transcript</div>
+        
+        <div id="summary" class="summary" role="region" aria-labelledby="summary-title"></div>
+        <div id="summary-title" class="sr-only">Meeting summary</div>
+      </section>
+    </main>
+
+    <nav class="tabbar" role="navigation" aria-label="Main navigation">
+      <button class="tab" data-tab="past" type="button" aria-describedby="past-help">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span>Past</span>
+      </button>
+      <button class="tab" data-tab="upcoming" type="button" aria-describedby="upcoming-help">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+          <line x1="16" y1="2" x2="16" y2="6"/>
+          <line x1="8" y1="2" x2="8" y2="6"/>
+          <line x1="3" y1="10" x2="21" y2="10"/>
+        </svg>
+        <span>Upcoming</span>
+      </button>
+      <button class="tab active" data-tab="record" type="button" aria-describedby="record-tab-help">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+        <span>Record</span>
+      </button>
+      <button class="tab" data-tab="files" type="button" aria-describedby="files-help">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+          <polyline points="13,2 13,9 20,9"/>
+        </svg>
+        <span>Files</span>
+      </button>
+      
+      <!-- Hidden help text for screen readers -->
+      <div id="past-help" class="sr-only">View past recordings</div>
+      <div id="upcoming-help" class="sr-only">View upcoming meetings</div>
+      <div id="record-tab-help" class="sr-only">Record new meeting</div>
+      <div id="files-help" class="sr-only">Manage files</div>
+    </nav>
+
+    <section id="panes" class="hidden">
+      <div class="pane" data-pane="past" role="tabpanel" aria-labelledby="past-help"></div>
+      <div class="pane" data-pane="upcoming" role="tabpanel" aria-labelledby="upcoming-help"></div>
+      <div class="pane active" data-pane="record" role="tabpanel" aria-labelledby="record-tab-help"></div>
+      <div class="pane" data-pane="files" role="tabpanel" aria-labelledby="files-help"></div>
+    </section>
+
+    <!-- Loading indicator -->
+    <div id="loadingIndicator" class="loading-indicator hidden" role="status" aria-live="polite">
+      <div class="loading-spinner"></div>
+      <span>Processing...</span>
+    </div>
+
+    <script src="app.client.js"></script>
+  </body>
+</html>
