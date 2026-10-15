@@ -9,10 +9,11 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "test": "node --test --experimental-test-module-mocks"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.134.0",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "imapflow": "^2.4.2",
     "mailparser": "^3.9.39"
   }

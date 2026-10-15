@@ -21,7 +21,21 @@ Lotus Notes mail --Notes rule "send copy to" you+notes@gmail.com--> Gmail --IMAP
 Voice notes / audio --Telegram--> Pal --OpenAI transcription--> text --Claude--> reply / minutes
 ```
 
-WhatsApp has no API for personal accounts, and Meta bars general-purpose AI bots from the WhatsApp Business API, so no assistant can read your WhatsApp. Copy-paste or Export chat into Pal is the shortest path.
+WhatsApp: Pal links to your own WhatsApp as a read-only device (step 4b), the same approach Pally uses to "connect your own WhatsApp". It reads and alerts; you send.
+
+## Pal vs Pally
+
+| | Pally | Pal |
+|---|---|---|
+| Where you talk to it | iMessage, RCS/SMS, Telegram | Telegram (iPhone + laptop) |
+| Texts you first, recipes, nagging reminders | ✅ | ✅ |
+| Watches your WhatsApp | ✅ read and reply | ✅ read-only; drafts replies for you to send |
+| Email inbox | Gmail / Outlook | Lotus Notes (forwarded); Outlook after M365 |
+| Calendar | Google / Outlook, read and write | Every iPhone calendar incl. Lotus/Traveler, read-only |
+| Voice notes and meeting minutes in EN/中文/BM | – | ✅ |
+| Lotus Notes triage and invite clash check | – | ✅ |
+| Phone calls and web bookings for you | ✅ | ✕ (not needed for this role) |
+| Your data | Pally's servers | Your own server and API keys |
 
 ---
 
@@ -62,6 +76,21 @@ This reads **every calendar on your iPhone**, including Lotus Notes via Traveler
 8. Run it once by hand. Within 5 minutes Pal messages you "📅 Calendar connected".
 
 *Send Email* uses the Apple Mail app, so at least one account (iCloud or Gmail) must be set up there.
+
+### 4b. Link WhatsApp, read-only (2 min, after Pal is running)
+1. In Telegram, send Pal: `/whatsapp link 60XXXXXXXXX` (your WhatsApp number, country code first, no +).
+2. Pal replies with an 8-character pairing code.
+3. On your phone: WhatsApp → **Settings → Linked devices → Link a device → Link with phone number instead** → enter the code.
+4. Pal confirms "WhatsApp linked". It appears in Linked devices as **Pal (Mac OS)**.
+
+What Pal does with it:
+- **Never sends** a message, **never** sends read receipts (no blue ticks), **never** shows you online, so your phone still notifies you as normal.
+- After a 10-minute hold (so your own replies cancel it), it flags DMs and group messages aimed at you (mentions, replies, "boss", "老板") that need your answer, with **Draft reply** (in the chat's language) and **Remind me** buttons.
+- Transcribes voice notes sent to you directly (up to 3 minutes).
+- Sends a group digest at 12:45 and 6:30pm, and lists "waiting on you" in the 7:30 brief. `/wa` shows it any time. Ask "what did the Northern dealers group say about Kansai?"
+- Keeps 7 days of messages on your server only.
+
+**Risk, in plain words:** this uses WhatsApp's linked-device protocol through an unofficial library (Baileys). WhatsApp can ban numbers it flags for unofficial clients. Read-only use with no sending is the lowest-risk pattern, but the risk isn't zero, and this is your main number. To stop at any time: `/whatsapp unlink`, or remove "Pal" under Linked devices.
 
 ### 5. Put Pal in the cloud (Railway, 10 min)
 Pal runs on a cloud server around the clock, so it keeps working when your laptop is off or closed. Nothing in the chain needs your laptop:
@@ -112,7 +141,7 @@ Teams and Outlook mail and calendar can then be read directly through Microsoft 
 - Hosting: Railway Hobby, US$5/month.
 
 ## Privacy: check before you forward company mail
-Messages pass through Telegram (cloud chats are not end-to-end encrypted), the Anthropic API and the OpenAI API. Neither API trains on your data by default. Before you forward all Lotus Notes mail, confirm this is acceptable under PMC / Nippon Paint policy, or limit the Notes rule to non-confidential senders.
+Messages pass through Telegram (cloud chats are not end-to-end encrypted), the Anthropic API and the OpenAI API, and with WhatsApp linked, your WhatsApp messages are stored on your Pal server for 7 days. Neither API trains on your data by default. Before you forward all Lotus Notes mail, confirm this is acceptable under PMC / Nippon Paint policy, or limit the Notes rule to non-confidential senders.
 
 ## Development
 `npm test` runs the unit tests. Set `TELEGRAM_API_BASE`, `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` to point at local mocks for end-to-end runs.

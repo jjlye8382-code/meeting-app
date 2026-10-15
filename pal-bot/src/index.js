@@ -9,6 +9,8 @@ import { pollMail, mailEnabled, notesAddress, inviteLine } from "./mail.js";
 import { RECIPES, recipeState, setRecipe } from "./recipes.js";
 import { claudeErrorText, askText } from "./claude.js";
 import { executeTool } from "./tools.js";
+import { startWhatsApp, unlinkWhatsApp, waState, waLinkedBefore, triageWhatsApp, waData, waMaintenance } from "./whatsapp.js";
+import { unanswered } from "./wa-logic.js";
 import {
   completeTask, snoozeTask, makeTask, openTasks, isMine, isOverdue, hasTime, parseLocal, taskLine, sod, addDays,
   eventsBetween, eventLine, fmtDay, fmtTime, ymd, hm, rm, isRecipeDue, newId,
@@ -42,16 +44,18 @@ const HELP = `**I'm Pal.** Text me, or send a voice note in English, 中文 or B
 
 **After a call:** send a voice note (talk for 30 sec). Over ${config.shortVoiceSeconds}s, I write minutes.
 **Meetings:** send the recording (up to 20 MB), the Zoom transcript (.vtt), or tap /meeting first.
-**WhatsApp:** select messages → Copy → paste here, or Export chat → share the .txt to me.
+**WhatsApp:** once linked (/whatsapp), I read your chats (never send) and flag what needs you; /wa shows who is waiting.
 
 /brief morning brief · /today · /week · /todo · /waiting · /spend · /notes · /recipes · /new fresh chat · /status`;
 
+const waLabel = () => ({ connected: "linked, read-only", connecting: "reconnecting…", linking: "waiting for pairing code" })[waState()] || "not linked: /whatsapp link <number>";
 function statusText() {
   const d = db(), at = d.agenda.receivedAt;
   return ["**Pal status**",
     `- Claude model: ${config.model}`,
     `- Voice notes: ${config.openaiKey ? "on (" + config.transcribeModel + ")" : "off: add OPENAI_API_KEY"}`,
     `- Calendar feed: ${at ? `${d.agenda.count ?? d.agenda.events.length} events, received ${fmtDay(new Date(at))} ${fmtTime(new Date(at))}` : "not received yet (set up the iPhone Shortcut)"}`,
+    `- WhatsApp: ${waLabel()}`,
     `- Lotus Notes mail: ${mailEnabled() ? `forward to ${notesAddress()} · ${d.mail.length} received` : "off: add GMAIL_ADDRESS and GMAIL_APP_PASSWORD"}`,
     `- Reminders open: ${openTasks(d.tasks).length} · expenses logged: ${d.expenses.length} · minutes saved: ${d.captures.length}`,
   ].join("\n");
@@ -114,6 +118,21 @@ async function command(chatId, cmd, arg) {
     case "meeting":
       d.mode = "meeting"; save();
       return tg.send(chatId, "Meeting mode: send the recording, voice note, transcript or notes next, and I'll write minutes.");
+    case "whatsapp": {
+      const [sub, num] = String(arg || "").trim().split(/\s+/);
+      if (sub === "link") {
+        if (!/^\+?\d{9,15}$/.test(num || "")) return tg.send(chatId, "Send your WhatsApp number with country code, e.g. `/whatsapp link 60123456789`.");
+        await tg.send(chatId, "Requesting a pairing code from WhatsApp…");
+        return startWhatsApp({ phone: num, onNotify: (t) => tg.send(chatId, t) });
+      }
+      if (sub === "unlink") { await unlinkWhatsApp(); return tg.send(chatId, "WhatsApp unlinked. I no longer read your chats. Also check WhatsApp → Linked devices."); }
+      return tg.send(chatId, `**WhatsApp: ${waLabel()}**\n\nRead-only link: I never send, never mark messages read, never show you online.\n- \`/whatsapp link 60123456789\` link (pairing code arrives here)\n- \`/whatsapp unlink\` stop\n- /wa who's waiting on you`);
+    }
+    case "wa": {
+      const w = unanswered(waData()).slice(0, 15);
+      if (waState() !== "connected" && !w.length) return tg.send(chatId, "WhatsApp isn't linked yet. Send `/whatsapp link <your number>`.");
+      return tg.send(chatId, w.length ? "**WhatsApp · waiting on you**\n" + w.map((x) => `- **${x.name}**${x.isGroup ? " (group)" : ""} · ${x.count} msg · since ${fmtDay(new Date(x.since))} ${fmtTime(new Date(x.since))}\n  ${x.last.text.replace(/\s+/g, " ").slice(0, 120)}`).join("\n") : "Nobody on WhatsApp is waiting on you. 👍");
+    }
     case "recipes": { const v = recipesView(); return tg.send(chatId, v.text, { buttons: v.buttons }); }
     default: return tg.send(chatId, "I don't know that command. /help shows what I can do.");
   }
@@ -247,13 +266,26 @@ async function handleCallback(q) {
       tg.answerCallback(q.id, `${r.name} ${on ? "on" : "off"}`);
       const v = recipesView(); return tg.send(chatId, v.text, { buttons: v.buttons });
     }
+    case "warep": {
+      tg.answerCallback(q.id);
+      const a = waData().alerts[id];
+      if (!a?.reply) return tg.send(chatId, "No reply drafted for that one.");
+      await tg.send(chatId, `Draft reply to ${a.from}${a.replyLang ? " (" + a.replyLang + ")" : ""}, long-press to copy into WhatsApp:`);
+      return tg.send(chatId, a.reply);
+    }
+    case "warem": {
+      const a = waData().alerts[id]; if (!a) return tg.answerCallback(q.id, "Gone.");
+      upsert("tasks", makeTask({ title: a.ask || a.summary, due: a.due, notes: `WhatsApp · ${a.chat}: ${a.text.slice(0, 200)}` }));
+      tg.clearButtons(chatId, q.message.message_id);
+      return tg.answerCallback(q.id, "Added to reminders");
+    }
     case "run": tg.answerCallback(q.id, "Running…"); return withTyping(chatId, () => runRecipe(id, chatId, { manual: true }));
     default: return tg.answerCallback(q.id);
   }
 }
 
 /* ---------- scheduler ---------- */
-let lastMailPoll = 0, ticking = false;
+let lastMailPoll = 0, lastWaTriage = 0, ticking = false;
 async function tick() {
   if (ticking || !owner()) return;
   ticking = true;
@@ -282,6 +314,14 @@ async function tick() {
     }
     for (const [k, h] of Object.entries(d.meta.headsUp)) if (new Date(h.start) < now - 864e5) delete d.meta.headsUp[k];
 
+    // WhatsApp: flag messages that need Lye, after a 10-minute hold so his own phone replies cancel them.
+    if (waState() === "connected" && now - lastWaTriage > 5 * 6e4) {
+      lastWaTriage = now.getTime();
+      for (const a of await triageWhatsApp(now.getTime())) {
+        const buttons = [[...(a.reply ? [{ text: "Draft reply", callback_data: `warep:${a.id}` }] : []), { text: "Remind me", callback_data: `warem:${a.id}` }]];
+        await tg.send(chatId, `💬 **WhatsApp · ${a.from}**${a.isGroup ? ` in ${a.chat}` : ""}\n${a.summary}${a.due ? "\nDue: " + a.due.replace("T", " ") : ""}\n\n> ${a.text.replace(/\s+/g, " ").slice(0, 280)}`, { buttons });
+      }
+    }
     if (mailEnabled() && now - lastMailPoll > config.gmail.pollMinutes * 6e4) {
       lastMailPoll = now.getTime();
       const res = await pollMail();
@@ -318,12 +358,14 @@ async function main() {
     { command: "waiting", description: "What others owe you" }, { command: "notes", description: "Lotus Notes, last 24h" },
     { command: "spend", description: "Spending, last 7 days" }, { command: "meeting", description: "Next recording/transcript becomes minutes" },
     { command: "recipes", description: "Switch routines on or off" }, { command: "new", description: "Start a fresh conversation" },
+    { command: "wa", description: "WhatsApp: who's waiting on you" }, { command: "whatsapp", description: "Link or unlink WhatsApp (read-only)" },
     { command: "status", description: "What's connected" }, { command: "help", description: "How to use Pal" },
   ]);
   console.log(`Pal is running. Owner: ${owner() || "(not set: send /start to the bot to get your id)"}`);
   if (owner() && !db().meta.welcomed) { db().meta.welcomed = true; save(); tg.send(owner(), "👋 Pal is online.\n\n" + HELP).catch(() => {}); }
   setInterval(tick, 30000); setTimeout(tick, 3000);
-  setInterval(prune, 864e5);
+  setInterval(() => { prune(); waMaintenance(); }, 864e5);
+  if (waLinkedBefore()) startWhatsApp({ onNotify: (t) => tg.send(owner(), t) }).catch((e) => console.error("WhatsApp start failed:", e.message));
 
   let offset = 0;
   for (;;) {

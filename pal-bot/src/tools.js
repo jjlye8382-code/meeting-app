@@ -1,6 +1,8 @@
 // Tools Claude can call during chat. Definitions stay fixed for the life of the process
 // (a changing tool list would invalidate the conversation's cache and thinking).
 import { db, upsert, remove, save } from "./store.js";
+import { waData, waState } from "./whatsapp.js";
+import { search as waSearch, unanswered } from "./wa-logic.js";
 import {
   makeTask, completeTask, normDue, openTasks, makeExpense, CATS, sum, totals, inRange, findDuplicates,
   sod, addDays, parseLocal, eventsBetween, hm, ymd,
@@ -30,6 +32,9 @@ export const TOOLS = [
     input_schema: obj({ query: { type: "string" }, days: { type: "number" } }) },
   { name: "search_captures", description: "Search past meeting minutes, call debriefs and chat summaries Pal made. Returns title, date, summary, decisions and actions.",
     input_schema: obj({ query: { type: "string" } }) },
+  { name: "search_whatsapp", description: "Search Lye's WhatsApp messages (read-only link, last 7 days). Filter by text and/or chat/group name. Returns chat, sender, time, text.",
+    input_schema: obj({ query: { type: "string" }, chat: { type: "string", description: "Part of a contact or group name" }, days: { type: "number" } }) },
+  { name: "whatsapp_waiting", description: "WhatsApp chats where someone is waiting on Lye's reply (unanswered DMs and group messages aimed at him).", input_schema: obj({}) },
   { name: "set_preference", description: "Remember a lasting preference or fact Lye tells you (e.g. 'my EA is Mei Ling', 'brief me at 7am'). Use sparingly.",
     input_schema: obj({ key: { type: "string" }, value: { type: "string" } }, ["key", "value"]) },
 ];
@@ -88,6 +93,11 @@ export async function executeTool(name, i) {
     case "search_captures":
       return d.captures.filter((c) => match(i.query, c.title, c.result.summary.join(" "), c.result.decisions.join(" "), c.result.actions.map((a) => a.task + " " + a.owner).join(" "))).slice(-10).reverse()
         .map((c) => ({ title: c.title, date: ymd(new Date(c.created)), kind: c.kind, summary: c.result.summary, decisions: c.result.decisions, actions: c.result.actions }));
+    case "search_whatsapp":
+      if (waState() !== "connected" && !Object.keys(waData().chats).length) return "WhatsApp isn't linked. Lye can link it with /whatsapp link <number>.";
+      return waSearch(waData(), { query: i.query, chat: i.chat, days: Number(i.days) || 7 });
+    case "whatsapp_waiting":
+      return unanswered(waData()).slice(0, 20).map((w) => ({ chat: w.name, group: w.isGroup, waiting_since: hm(new Date(w.since)), messages: w.count, last: w.last.text.slice(0, 300) }));
     case "set_preference": {
       d.meta.prefs = { ...(d.meta.prefs || {}), [String(i.key).slice(0, 60)]: String(i.value).slice(0, 300) };
       save(); return "Saved";

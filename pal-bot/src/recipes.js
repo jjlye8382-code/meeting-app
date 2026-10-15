@@ -4,6 +4,8 @@ import { config } from "./config.js";
 import { db, upsert, save } from "./store.js";
 import { askText } from "./claude.js";
 import { inviteLine } from "./mail.js";
+import { whatsappDigest, waData, waState } from "./whatsapp.js";
+import { unanswered } from "./wa-logic.js";
 import {
   sod, addDays, weekStart, eventsBetween, eventLine, findClashes, isUnanswered, openTasks, isMine, isOverdue, taskLine, dueLabel,
   fmtDay, rm, sum, totals, inRange, findDuplicates, parseLocal, hm,
@@ -41,6 +43,7 @@ export const RECIPES = [
       const mail = d.mail.filter((m) => m.date > now - 18 * 36e5 && ["urgent", "today"].includes(m.urgency));
       const invites = d.mail.filter((m) => m.is_invite && m.date > now - 3 * 864e5 && parseLocal(m.invite_start) > now);
       const pending = eventsBetween(d.agenda.events, now, addDays(a, 8)).filter(isUnanswered);
+      const waWaiting = waState() === "connected" ? unanswered(waData(), now.getTime()).slice(0, 8) : [];
       const raw = [
         `Good morning, ${name()}. ${fmtDay(now)}`, feedNote(now),
         sect("Calendar", evs.map(eventLine).join("\n") || "- Nothing scheduled"),
@@ -48,6 +51,7 @@ export const RECIPES = [
         sect("Lotus Notes needing you", mail.map((m) => `- ${m.from}: ${m.subject} — ${m.summary}`).join("\n") || "- Nothing urgent overnight"),
         invites.length ? sect("Invites to answer", invites.map(inviteLine).join("\n")) : "",
         pending.length ? sect("Unanswered in your calendar", pending.map((e) => `${eventLine(e).replace("- ", "- " + fmtDay(new Date(e.start)) + " ")}`).join("\n")) : "",
+        waWaiting.length ? sect("WhatsApp waiting on you", waWaiting.map((w) => `- ${w.name}${w.isGroup ? " (group)" : ""}: ${w.last.text.replace(/\s+/g, " ").slice(0, 100)}`).join("\n")) : "",
         sect("Your reminders", mine.map((t) => taskLine(t, now)).join("\n") || "- None due"),
         waiting.length ? sect("Overdue from others", waiting.map((t) => taskLine(t, now)).join("\n")) : "",
       ].filter(Boolean).join("\n\n");
@@ -57,6 +61,10 @@ export const RECIPES = [
     async run() { return notesDigest(); } },
   { id: "notes-digest-pm", name: "Lotus Notes digest (5:30pm)", sched: { freq: "weekdays", time: "17:30" }, on: true,
     async run() { return notesDigest(); } },
+  { id: "wa-digest", name: "WhatsApp digest", sched: { freq: "daily", time: "12:45" }, on: true,
+    async run(now) { return waState() === "connected" ? whatsappDigest(now.getTime()) : { empty: true }; } },
+  { id: "wa-digest-pm", name: "WhatsApp digest (6:30pm)", sched: { freq: "daily", time: "18:30" }, on: true,
+    async run(now) { return waState() === "connected" ? whatsappDigest(now.getTime()) : { empty: true }; } },
   { id: "friendly-nag", name: "Friendly nag", sched: { freq: "daily", time: "09:00" }, on: true,
     async run(now) { return nag(now); } },
   { id: "friendly-nag-pm", name: "Friendly nag (3pm)", sched: { freq: "weekdays", time: "15:00" }, on: true,
