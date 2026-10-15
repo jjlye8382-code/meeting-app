@@ -63,24 +63,38 @@ This reads **every calendar on your iPhone**, including Lotus Notes via Traveler
 
 *Send Email* uses the Apple Mail app, so at least one account (iCloud or Gmail) must be set up there.
 
-### 5. Run Pal
-```bash
-cd pal-bot
-cp .env.example .env      # fill in the values from steps 1-3
-npm install
-npm start
-```
-Send `/start` to your bot. It replies with your Telegram id. Put that id in `TELEGRAM_OWNER_ID`, restart, and Pal answers only you. `/status` shows what's connected.
+### 5. Put Pal in the cloud (Railway, 10 min)
+Pal runs on a cloud server around the clock, so it keeps working when your laptop is off or closed. Nothing in the chain needs your laptop:
 
-### 6. Keep it running (pick one)
-Pal must run 24/7 to push briefs and reminders.
-
-| Option | Cost | How |
+| Piece | Runs on | Laptop needed? |
 |---|---|---|
-| **Railway** (easiest) | about US$5/month | New project → Deploy from GitHub → this repo, root directory `pal-bot` → add the `.env` values as Variables → add a **Volume** mounted at `/app/data` and set `DATA_DIR=/app/data`. |
-| Always-on office or home PC / Mac mini | free | `npm install -g pm2 && pm2 start src/index.js --name pal && pm2 save && pm2 startup` |
+| Pal itself | Railway cloud server, 24/7 | No |
+| Telegram chats and voice notes | Your iPhone (or Telegram on any device) | No |
+| Calendar feed | iPhone Shortcut automation (phone just needs to be on with mobile data) | No |
+| Lotus Notes forwarding | The Notes mail rule runs on the Domino mail server | No |
 
-Avoid free tiers that sleep when idle (e.g. Render free): Pal would miss its schedules.
+Steps:
+1. Go to **railway.com** → **Login with GitHub** (account `jjlye8382-code`). Choose the **Hobby** plan (US$5/month; it includes US$5 of usage, which covers Pal).
+2. **New Project** → **Deploy from GitHub repo** → `meeting-app`.
+3. Click the new service → **Settings**:
+   - **Source → Root Directory:** `pal-bot` (Railway then finds the Dockerfile).
+   - **Source → Branch:** `main` once this PR is merged (or `claude/pal-telegram-bot` to try it now).
+   - **Deploy → Replicas:** keep **1**. Two copies would fight over the bot.
+4. **Variables → Raw Editor** → paste:
+   ```
+   TELEGRAM_BOT_TOKEN=...
+   ANTHROPIC_API_KEY=...
+   OPENAI_API_KEY=...
+   GMAIL_ADDRESS=jjlye8382@gmail.com
+   GMAIL_APP_PASSWORD=...
+   ```
+5. Right-click the service → **Attach Volume** → mount path **`/data`**. This keeps your reminders, expenses and minutes across updates.
+6. Railway deploys. Under **Deployments → Logs** you should see `Pal is running`.
+7. In Telegram, send `/start` to your bot. It replies with your id. Add `TELEGRAM_OWNER_ID=<that id>` in **Variables**; Railway restarts Pal and it now answers only you. Send `/status` to check what's connected.
+
+Updates: every push to the branch redeploys automatically. Your data stays on the volume.
+
+**Try it on a computer first (optional):** `cp .env.example .env`, fill it in, `npm install && npm start`. Stop it before starting the Railway copy.
 
 ---
 
@@ -95,7 +109,7 @@ Teams and Outlook mail and calendar can then be read directly through Microsoft 
 ## Running costs (rough estimate)
 - Claude (`claude-opus-5-5`, US$4 / US$20 per million input/output tokens): about US$20–40/month for 20–40 messages a day plus mail triage and minutes. Setting `CLAUDE_MODEL=claude-sonnet-5-5` roughly halves this.
 - Transcription (`gpt-4o-transcribe`): about US$0.006 per minute of audio, so roughly US$10/month for an hour a day.
-- Hosting: US$0–5/month.
+- Hosting: Railway Hobby, US$5/month.
 
 ## Privacy: check before you forward company mail
 Messages pass through Telegram (cloud chats are not end-to-end encrypted), the Anthropic API and the OpenAI API. Neither API trains on your data by default. Before you forward all Lotus Notes mail, confirm this is acceptable under PMC / Nippon Paint policy, or limit the Notes rule to non-confidential senders.
