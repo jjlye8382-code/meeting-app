@@ -1,0 +1,20 @@
+{
+  "name": "pal-bot",
+  "version": "1.0.0",
+  "description": "Lye's Pal: a personal assistant on Telegram. Voice notes in English, Chinese and Malay, reminders, spending, iPhone/Lotus calendar feed and Lotus Notes mail via Gmail.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --experimental-test-module-mocks"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "imapflow": "^2.4.2",
+    "mailparser": "^3.9.39"
+  }
+}
